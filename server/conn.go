@@ -95,7 +95,6 @@ func NewConn(conn io.ReadWriteCloser, client *minecraft.Conn, logger *slog.Logge
 					c.deferPacket(payload)
 					continue
 				}
-
 				handled := false
 				for _, id := range c.expectedIds.Load().([]uint32) {
 					for _, latest := range c.protocol.ConvertToLatest(pk, client) {
@@ -297,6 +296,7 @@ func (c *Conn) sendConnectionRequest() error {
 	}
 
 	err = c.WritePacket(&packet2.ConnectionRequest{
+		Protocol:     c.protocol.ID(),
 		Addr:         c.clientConn.RemoteAddr().String(),
 		Token:        c.token,
 		ClientData:   clientData,
@@ -338,7 +338,17 @@ func (c *Conn) handleConnectionResponse(pk *packet2.ConnectionResponse) (bool, e
 
 // handleStartGame handles the StartGame packet.
 func (c *Conn) handleStartGame(pk *packet.StartGame) (bool, error) {
-	c.expect(packet.IDItemRegistry)
+	// Check if the conn's protocol is expecting the item registry. Otherwise, go straight to updating the chunk radius properly.
+	if c.protocol.ID() >= 776 {
+		c.expect(packet.IDItemRegistry)
+		c.logger.Debug("received start_game, expecting item_registry")
+	} else {
+		c.expect(packet.IDChunkRadiusUpdated)
+		if err := c.WritePacket(&packet.RequestChunkRadius{ChunkRadius: 16}); err != nil {
+			return false, err
+		}
+		c.logger.Debug("received start_game, expecting chunk_radius_updated")
+	}
 	c.gameData = minecraft.GameData{
 		Difficulty:                   pk.Difficulty,
 		WorldName:                    pk.WorldName,
@@ -372,7 +382,6 @@ func (c *Conn) handleStartGame(pk *packet.StartGame) (bool, error) {
 		Experiments:                  pk.Experiments,
 		UseBlockNetworkIDHashes:      pk.UseBlockNetworkIDHashes,
 	}
-	c.logger.Debug("received start_game, expecting item_registry")
 	return false, nil
 }
 
