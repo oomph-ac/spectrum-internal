@@ -9,4 +9,6 @@ func init() {
 	packet.RegisterPacketFromServer(IDConnectionResponse, func() packet.Packet { return &ConnectionResponse{} })
 	packet.RegisterPacketFromServer(IDLatency, func() packet.Packet { return &Latency{} })
 	packet.RegisterPacketFromServer(IDTransfer, func() packet.Packet { return &Transfer{} })
+
+	packet.RegisterPacketFromServer(IDEOBNotification, func() packet.Packet { return &EOBNotification{} })
 }

@@ -42,6 +42,8 @@ loop:
 			if err := s.Transfer(pk.Addr); err != nil {
 				logError(s, "failed to transfer", err)
 			}
+		case *packet2.EOBNotification:
+			s.processor.ProcessEndOfBatch()
 		case packet.Packet:
 			ctx := NewContext()
 			s.processor.ProcessServer(ctx, &pk)

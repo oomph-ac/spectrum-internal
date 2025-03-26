@@ -45,6 +45,8 @@ type Processor interface {
 	ProcessPostTransfer(ctx *Context, origin *string, target *string)
 	// ProcessDisconnection is called when the player disconnects from the proxy.
 	ProcessDisconnection(ctx *Context)
+	// ProcessEndOfBatch is called when the end of a batch of packets is reached. No cancellation is possible.
+	ProcessEndOfBatch()
 }
 
 // NopProcessor is a no-operation implementation of the Processor interface.
@@ -62,3 +64,4 @@ func (NopProcessor) ProcessPreTransfer(_ *Context, _ *string, _ *string)     {}
 func (NopProcessor) ProcessTransferFailure(_ *Context, _ *string, _ *string) {}
 func (NopProcessor) ProcessPostTransfer(_ *Context, _ *string, _ *string)    {}
 func (NopProcessor) ProcessDisconnection(_ *Context)                         {}
+func (NopProcessor) ProcessEndOfBatch()                                      {}

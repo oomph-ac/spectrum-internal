@@ -5,4 +5,7 @@ const (
 	IDConnectionResponse
 	IDLatency
 	IDTransfer
+	_
+	_
+	IDEOBNotification
 )
