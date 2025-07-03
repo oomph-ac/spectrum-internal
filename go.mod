@@ -1,19 +1,21 @@
 module github.com/cooldogedev/spectrum
 
-go 1.23.3
+go 1.24
+
+toolchain go1.24.4
 
 require (
 	github.com/cooldogedev/spectral v0.0.5
 	github.com/go-gl/mathgl v1.2.0
 	github.com/golang/snappy v1.0.0
 	github.com/quic-go/quic-go v0.50.0
-	github.com/sandertv/gophertunnel v1.44.1-0.20250306105157-a61732e9cb7b
+	github.com/sandertv/gophertunnel v1.47.6
 	github.com/scylladb/go-set v1.0.2
 )
 
 require (
 	github.com/francoispqt/gojay v1.2.13 // indirect
-	github.com/go-jose/go-jose/v4 v4.0.5 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.0 // indirect
 	github.com/go-task/slim-sprig/v3 v3.0.0 // indirect
 	github.com/google/pprof v0.0.0-20250317173921-a4b03ec1a45e // indirect
 	github.com/google/uuid v1.6.0 // indirect
