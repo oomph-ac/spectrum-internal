@@ -38,12 +38,15 @@ type Session struct {
 	transport transport.Transport
 
 	animation animation.Animation
-	processor Processor
 	tracker   *tracker
 
-	latency      atomic.Int64
-	transferring atomic.Bool
-	once         sync.Once
+	processor   Processor
+	processorMu sync.RWMutex
+
+	cache      atomic.Value
+	latency    atomic.Int64
+	inFallback atomic.Bool
+	once       sync.Once
 }
 
 // NewSession creates a new Session instance using the provided minecraft.Conn.
@@ -58,11 +61,13 @@ func NewSession(client *minecraft.Conn, logger *slog.Logger, registry *Registry,
 		opts:      opts,
 		transport: transport,
 
-		animation: &animation.Dimension{},
 		processor: NopProcessor{},
+
+		animation: &animation.Dimension{},
 		tracker:   newTracker(),
 	}
 	s.ctx, s.cancelFunc = context.WithCancelCause(client.Context())
+	s.cache.Store([]byte(nil))
 	return s
 }
 
@@ -91,28 +96,37 @@ func (s *Session) LoginContext(ctx context.Context) (err error) {
 		return err
 	}
 
-	serverConn, err := s.dial(ctx, serverAddr)
+	conn, err := s.dial(ctx, serverAddr)
 	if err != nil {
 		s.logger.Debug("dialer failed", "err", err)
 		return err
 	}
 
-	s.serverAddr = serverAddr
-	s.serverConn = serverConn
-	if err := serverConn.ConnectContext(ctx); err != nil {
+	go handleServer(s)
+	go handleClient(s)
+	go handleLatency(s, s.opts.LatencyInterval)
+	if err := conn.DoConnect(); err != nil {
 		s.logger.Debug("connection sequence failed", "err", err)
 		return err
 	}
 
-	gameData := serverConn.GameData()
-	s.processor.ProcessStartGame(NewContext(), &gameData)
+	if err := conn.WaitConnect(s.ctx); err != nil {
+		conn.CloseWithError(fmt.Errorf("connection sequence failed: %w", err))
+		s.logger.Debug("connection sequence failed", "err", err)
+		return err
+	}
+
+	gameData := conn.GameData()
+	s.Processor().ProcessStartGame(NewContext(), &gameData)
 	if err := s.client.StartGame(gameData); err != nil {
 		s.logger.Debug("startgame sequence failed", "err", err)
 		return err
 	}
-	go handleServer(s)
-	go handleClient(s)
-	go handleLatency(s, s.opts.LatencyInterval)
+
+	if err := conn.DoSpawn(); err != nil {
+		s.logger.Debug("spawn sequence failed", "err", err)
+		return err
+	}
 	s.registry.AddSession(identityData.XUID, s)
 	s.logger.Info("logged in session")
 	return
@@ -138,81 +152,45 @@ func (s *Session) TransferTimeout(addr string, duration time.Duration) (err erro
 // occurs at a time, returning an error if another transfer is already in progress.
 // The process is performed using the provided context for cancellation.
 func (s *Session) TransferContext(ctx context.Context, addr string) (err error) {
-	if !s.transferring.CompareAndSwap(false, true) {
-		return errors.New("already transferring")
-	}
-
-	defer s.transferring.Store(false)
-
+	s.serverMu.RLock()
+	origin := s.serverAddr
+	s.serverMu.RUnlock()
 	processorCtx := NewContext()
-	s.processor.ProcessPreTransfer(processorCtx, &s.serverAddr, &addr)
+	s.Processor().ProcessPreTransfer(processorCtx, &origin, &addr)
 	if processorCtx.Cancelled() {
 		return errors.New("processor failed")
 	}
 
-	if s.serverAddr == addr {
-		return errors.New("already connected to this server")
-	}
-
-	s.serverMu.Lock()
-	defer func() {
-		if err != nil {
-			s.sendMetadata(false)
-			s.serverMu.Unlock()
-			s.processor.ProcessTransferFailure(NewContext(), &s.serverAddr, &addr)
-		}
-	}()
-
+	s.sendMetadata(true)
 	conn, err := s.dial(ctx, addr)
 	if err != nil {
-		s.logger.Debug("dialer failed", "err", err)
-		return err
+		s.Processor().ProcessTransferFailure(NewContext(), &origin, &addr)
+		return fmt.Errorf("dialer failed: %w", err)
 	}
 
-	s.sendMetadata(true)
-	if err := conn.ConnectContext(ctx); err != nil {
-		conn.CloseWithError(fmt.Errorf("connection sequence failed: %w", err))
-		s.logger.Debug("connection sequence failed", "err", err)
-		return err
+	if err := conn.DoConnect(); err != nil {
+		s.Processor().ProcessTransferFailure(NewContext(), &origin, &addr)
+		return fmt.Errorf("connection sequence failed failed: %w", err)
 	}
 
-	_ = s.serverConn.Close()
-	serverGameData := conn.GameData()
-	s.animation.Play(s.client, serverGameData)
-	chunk := emptyChunk(serverGameData.Dimension)
-	pos := serverGameData.PlayerPosition
-	chunkX := int32(pos.X()) >> 4
-	chunkZ := int32(pos.Z()) >> 4
-	for x := chunkX - 4; x <= chunkX+4; x++ {
-		for z := chunkZ - 4; z <= chunkZ+4; z++ {
-			_ = s.client.WritePacket(&packet.LevelChunk{
-				Dimension:     serverGameData.Dimension,
-				Position:      protocol.ChunkPos{x, z},
-				SubChunkCount: 1,
-				RawPayload:    chunk,
-			})
+	conn.OnConnect(func(err error) {
+		if err != nil {
+			s.Processor().ProcessTransferFailure(NewContext(), &origin, &addr)
+			return
 		}
-	}
-	s.tracker.clearAll(s)
-	_ = s.client.WritePacket(&packet.MovePlayer{
-		EntityRuntimeID: serverGameData.EntityRuntimeID,
-		Position:        serverGameData.PlayerPosition,
-		Pitch:           serverGameData.Pitch,
-		Yaw:             serverGameData.Yaw,
-		Mode:            packet.MoveModeReset,
+
+		gameData := conn.GameData()
+		s.animation.Play(s.client, gameData)
+		s.sendGameData(conn.GameData())
+		if err := conn.DoSpawn(); err != nil {
+			s.Processor().ProcessTransferFailure(NewContext(), &origin, &addr)
+			return
+		}
+		s.inFallback.Store(false)
+		s.animation.Clear(s.client, gameData)
+		s.Processor().ProcessPostTransfer(NewContext(), &origin, &addr)
+		s.logger.Debug("transferred session", "origin", origin, "target", addr)
 	})
-	_ = s.client.WritePacket(&packet.LevelEvent{EventType: packet.LevelEventStopRaining, EventData: 10_000})
-	_ = s.client.WritePacket(&packet.LevelEvent{EventType: packet.LevelEventStopThunderstorm})
-	_ = s.client.WritePacket(&packet.SetDifficulty{Difficulty: uint32(serverGameData.Difficulty)})
-	_ = s.client.WritePacket(&packet.SetPlayerGameType{GameType: serverGameData.PlayerGameMode})
-	_ = s.client.WritePacket(&packet.GameRulesChanged{GameRules: serverGameData.GameRules})
-	origin := s.serverAddr
-	s.animation.Clear(s.client, serverGameData)
-	s.serverAddr = addr
-	s.serverConn = conn
-	s.serverMu.Unlock()
-	s.processor.ProcessPostTransfer(NewContext(), &origin, &addr)
-	s.logger.Debug("transferred session", "origin", origin, "target", addr)
 	return nil
 }
 
@@ -226,24 +204,32 @@ func (s *Session) SetAnimation(animation animation.Animation) {
 	s.animation = animation
 }
 
-// Opts returns the current session options.
-func (s *Session) Opts() util.Opts {
-	return s.opts
+// Cache returns the current session cache.
+func (s *Session) Cache() []byte {
+	return s.cache.Load().([]byte)
 }
 
-// SetOpts updates the session options.
-func (s *Session) SetOpts(opts util.Opts) {
-	s.opts = opts
+// SetCache updates the session cache.
+func (s *Session) SetCache(cache []byte) {
+	ctx := NewContext()
+	s.Processor().ProcessCache(ctx, &cache)
+	if !ctx.Cancelled() {
+		s.cache.Store(cache)
+	}
 }
 
 // Processor returns the current processor.
 func (s *Session) Processor() Processor {
+	s.processorMu.RLock()
+	defer s.processorMu.RUnlock()
 	return s.processor
 }
 
 // SetProcessor sets a new processor for the session.
 func (s *Session) SetProcessor(processor Processor) {
+	s.processorMu.Lock()
 	s.processor = processor
+	s.processorMu.Unlock()
 }
 
 // Latency returns the total latency experienced by the session, combining client and server latencies.
@@ -284,16 +270,17 @@ func (s *Session) Close() (err error) {
 
 func (s *Session) CloseWithError(err error) {
 	s.once.Do(func() {
-		_ = s.client.WritePacket(&packet.Disconnect{Message: err.Error()})
+		message := err.Error()
+		s.Processor().ProcessDisconnection(NewContext(), &message)
+		_ = s.client.WritePacket(&packet.Disconnect{Message: message})
 		_ = s.client.Close()
-		s.processor.ProcessDisconnection(NewContext())
 		s.serverMu.RLock()
 		if s.serverConn != nil {
 			s.serverConn.CloseWithError(err)
 		}
 		s.serverMu.RUnlock()
 		s.registry.RemoveSession(s.client.IdentityData().XUID)
-		s.logger.Info("closed session")
+		s.logger.Info("closed session", "err", err)
 	})
 }
 
@@ -306,35 +293,46 @@ func (s *Session) dial(ctx context.Context, addr string) (*server.Conn, error) {
 	default:
 	}
 
+	s.serverMu.Lock()
+	defer s.serverMu.Unlock()
+	if s.serverConn != nil {
+		_ = s.serverConn.Close()
+	}
+
 	conn, err := s.transport.Dial(ctx, addr)
 	if err != nil {
 		return nil, err
 	}
-	return server.NewConn(conn, s.client, s.logger.With("addr", addr), s.opts.SyncProtocol, s.opts.Token), nil
+	c := server.NewConn(conn, s.client, s.logger.With("addr", addr), s.opts.SyncProtocol, s.Cache())
+	s.serverAddr = addr
+	s.serverConn = c
+	return c, nil
 }
 
 // fallback attempts to transfer the session to a fallback server provided by the discovery.
-func (s *Session) fallback() (err error) {
+func (s *Session) fallback() error {
 	select {
 	case <-s.ctx.Done():
 		return context.Cause(s.ctx)
 	default:
 	}
 
+	if !s.inFallback.CompareAndSwap(false, true) {
+		return errors.New("already in fallback")
+	}
+
 	addr, err := s.discovery.DiscoverFallback(s.client)
 	if err != nil {
-		return err
+		return fmt.Errorf("discovery failed: %w", err)
 	}
 
+	s.logger.Debug("transferring session to a fallback server", "addr", addr)
 	if err := s.Transfer(addr); err != nil {
-		return err
+		return fmt.Errorf("transfer failed: %w", err)
 	}
-	s.logger.Info("transferred session to a fallback server", "addr", addr)
-	return
+	return nil
 }
 
-// sendMetadata toggles the player's immobility during transfers to prevent position mismatches
-// between the client and the server.
 func (s *Session) sendMetadata(noAI bool) {
 	metadata := protocol.NewEntityMetadata()
 	if noAI {
@@ -346,4 +344,40 @@ func (s *Session) sendMetadata(noAI bool) {
 		EntityRuntimeID: s.client.GameData().EntityRuntimeID,
 		EntityMetadata:  metadata,
 	})
+}
+
+func (s *Session) sendGameData(gameData minecraft.GameData) {
+	chunk := emptyChunk(gameData.Dimension)
+	pos := gameData.PlayerPosition
+	chunkX := int32(pos.X()) >> 4
+	chunkZ := int32(pos.Z()) >> 4
+	for x := chunkX - 4; x <= chunkX+4; x++ {
+		for z := chunkZ - 4; z <= chunkZ+4; z++ {
+			_ = s.client.WritePacket(&packet.LevelChunk{
+				Dimension:     gameData.Dimension,
+				Position:      protocol.ChunkPos{x, z},
+				SubChunkCount: 1,
+				RawPayload:    chunk,
+			})
+		}
+	}
+	s.tracker.mu.Lock()
+	s.tracker.clearEffects(s)
+	s.tracker.clearEntities(s)
+	s.tracker.clearBossBars(s)
+	s.tracker.clearPlayers(s)
+	s.tracker.clearScoreboards(s)
+	s.tracker.mu.Unlock()
+	_ = s.client.WritePacket(&packet.MovePlayer{
+		EntityRuntimeID: gameData.EntityRuntimeID,
+		Position:        gameData.PlayerPosition,
+		Pitch:           gameData.Pitch,
+		Yaw:             gameData.Yaw,
+		Mode:            packet.MoveModeReset,
+	})
+	_ = s.client.WritePacket(&packet.LevelEvent{EventType: packet.LevelEventStopRaining, EventData: 10_000})
+	_ = s.client.WritePacket(&packet.LevelEvent{EventType: packet.LevelEventStopThunderstorm})
+	_ = s.client.WritePacket(&packet.SetDifficulty{Difficulty: uint32(gameData.Difficulty)})
+	_ = s.client.WritePacket(&packet.SetPlayerGameType{GameType: gameData.PlayerGameMode})
+	_ = s.client.WritePacket(&packet.GameRulesChanged{GameRules: gameData.GameRules})
 }

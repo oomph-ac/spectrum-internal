@@ -8,7 +8,7 @@ import (
 	"slices"
 	"time"
 
-	packet2 "github.com/cooldogedev/spectrum/server/packet"
+	spectrumpacket "github.com/cooldogedev/spectrum/server/packet"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 )
 
@@ -18,35 +18,50 @@ loop:
 	for {
 		select {
 		case <-s.ctx.Done():
+			s.CloseWithError(context.Cause(s.ctx))
 			break loop
-		case <-s.serverConn.Context().Done():
-			if err := s.fallback(); err != nil {
-				s.CloseWithError(fmt.Errorf("fallback failed: %w", err))
-				logError(s, "failed to fallback to a different server", err)
-				break loop
-			}
 		default:
 		}
 
 		server := s.Server()
 		pk, err := server.ReadPacket()
 		if err != nil {
+			if server != s.Server() {
+				continue loop
+			}
+
 			server.CloseWithError(fmt.Errorf("failed to read packet from server: %w", err))
+			if err := s.fallback(); err != nil {
+				s.CloseWithError(fmt.Errorf("fallback failed: %w", err))
+				break loop
+			}
 			continue loop
 		}
 
 		switch pk := pk.(type) {
-		case *packet2.Latency:
+		case *spectrumpacket.Flush:
+			ctx := NewContext()
+			s.Processor().ProcessFlush(ctx)
+			if ctx.Cancelled() {
+				continue loop
+			}
+
+			if err := s.client.Flush(); err != nil {
+				s.CloseWithError(fmt.Errorf("failed to flush client's buffer: %w", err))
+				logError(s, "failed to flush client's buffer", err)
+				break loop
+			}
+		case *spectrumpacket.Latency:
 			s.latency.Store(pk.Latency)
-		case *packet2.Transfer:
+		case *spectrumpacket.Transfer:
 			if err := s.Transfer(pk.Addr); err != nil {
 				logError(s, "failed to transfer", err)
 			}
-		case *packet2.EOBNotification:
-			s.processor.ProcessEndOfBatch()
+		case *spectrumpacket.UpdateCache:
+			s.SetCache(pk.Cache)
 		case packet.Packet:
 			ctx := NewContext()
-			s.processor.ProcessServer(ctx, &pk)
+			s.Processor().ProcessServer(ctx, &pk)
 			if ctx.Cancelled() {
 				continue loop
 			}
@@ -66,7 +81,7 @@ loop:
 			}
 		case []byte:
 			ctx := NewContext()
-			s.processor.ProcessServerEncoded(ctx, &pk)
+			s.Processor().ProcessServerEncoded(ctx, &pk)
 			if ctx.Cancelled() {
 				continue loop
 			}
@@ -96,6 +111,7 @@ loop:
 	for {
 		select {
 		case <-s.ctx.Done():
+			s.CloseWithError(context.Cause(s.ctx))
 			break loop
 		default:
 		}
@@ -123,9 +139,10 @@ loop:
 	for {
 		select {
 		case <-s.ctx.Done():
+			s.CloseWithError(context.Cause(s.ctx))
 			break loop
 		case <-ticker.C:
-			if err := s.Server().WritePacket(&packet2.Latency{Latency: s.client.Latency().Milliseconds() * 2, Timestamp: time.Now().UnixMilli()}); err != nil {
+			if err := s.Server().WritePacket(&spectrumpacket.Latency{Latency: s.client.Latency().Milliseconds() * 2, Timestamp: time.Now().UnixMilli()}); err != nil {
 				logError(s, "failed to write latency packet", err)
 			}
 		}
@@ -141,7 +158,7 @@ func handleClientPacket(s *Session, header *packet.Header, pool packet.Pool, shi
 	}
 
 	if !slices.Contains(s.opts.ClientDecode, header.PacketID) {
-		s.processor.ProcessClientEncoded(ctx, &payload)
+		s.Processor().ProcessClientEncoded(ctx, &payload)
 		if !ctx.Cancelled() {
 			return s.Server().Write(payload)
 		}
