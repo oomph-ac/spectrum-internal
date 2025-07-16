@@ -5,8 +5,6 @@ import "github.com/sandertv/gophertunnel/minecraft/protocol"
 // ConnectionRequest is the initial packet sent by the proxy to the server.
 // The server responds to this packet with a ConnectionResponse packet.
 type ConnectionRequest struct {
-	// Protocol is the protocol version of the connecting client.
-	Protocol int32
 	// Addr is the address of the player.
 	Addr string
 	// ClientData is the player's login.ClientData.
@@ -29,7 +27,6 @@ func (pk *ConnectionRequest) ID() uint32 {
 
 // Marshal ...
 func (pk *ConnectionRequest) Marshal(io protocol.IO) {
-	io.Varint32(&pk.Protocol)
 	io.String(&pk.Addr)
 	io.ByteSlice(&pk.ClientData)
 	io.ByteSlice(&pk.IdentityData)
