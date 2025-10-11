@@ -8,6 +8,7 @@ import (
 // Context represents the context of an action. It holds the state of whether the action has been canceled.
 type Context struct {
 	canceled bool
+	modified bool
 }
 
 // NewContext returns a new context.
@@ -20,9 +21,18 @@ func (c *Context) Cancel() {
 	c.canceled = true
 }
 
+func (c *Context) Modified() bool {
+	return c.modified
+}
+
 // Cancelled returns whether the context has been cancelled.
 func (c *Context) Cancelled() bool {
 	return c.canceled
+}
+
+// Modify marks the context as modified. This function is used to indicate that the packet has been modified.
+func (c *Context) SetModified() {
+	c.modified = true
 }
 
 // Processor defines methods for processing various actions within a proxy session.

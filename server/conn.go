@@ -19,8 +19,10 @@ import (
 )
 
 const (
-	packetDecodeNeeded = byte(iota)
-	packetDecodeNotNeeded
+	flagPacketDecode byte = 1 << iota
+	flagPacketCompressed
+
+	compressionThreshold int = 256
 )
 
 var bufferPool = sync.Pool{
@@ -155,12 +157,19 @@ func (c *Conn) WritePacket(pk packet.Packet) error {
 		return err
 	}
 	pk.Marshal(c.protocol.NewWriter(buf, c.shieldID))
-	return c.writer.Write(snappy.Encode(nil, buf.Bytes()))
+
+	if buf.Len() > compressionThreshold {
+		return c.writer.Write(append([]byte{flagPacketCompressed}, snappy.Encode(nil, buf.Bytes())...))
+	}
+	return c.writer.Write(append([]byte{0}, buf.Bytes()...))
 }
 
 // Write writes provided byte slice to the underlying connection.
 func (c *Conn) Write(p []byte) error {
-	return c.writer.Write(snappy.Encode(nil, p))
+	if len(p) > compressionThreshold {
+		return c.writer.Write(append([]byte{flagPacketCompressed}, snappy.Encode(nil, p)...))
+	}
+	return c.writer.Write(append([]byte{0}, p...))
 }
 
 // DoConnect sends a ConnectionRequest packet to initiate the connection sequence.
@@ -274,24 +283,30 @@ func (c *Conn) read() (pk any, err error) {
 		return nil, err
 	}
 
-	if payload[0] != packetDecodeNeeded && payload[0] != packetDecodeNotNeeded {
-		return nil, fmt.Errorf("unknown decode byte marker %v", payload[0])
+	flags := payload[0]
+	//needDecode := flags&flagPacketDecode != 0
+	isCompressed := flags&flagPacketCompressed != 0
+
+	var decompressed []byte
+	if isCompressed {
+		decompressed, err = snappy.Decode(nil, payload[1:])
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		decompressed = payload[1:]
 	}
 
-	decompressed, err := snappy.Decode(nil, payload[1:])
-	if err != nil {
-		return nil, err
-	}
-
-	if payload[0] == packetDecodeNotNeeded {
+	/* if !needDecode {
 		return decompressed, nil
-	}
+	} */
 
 	buf := bytes.NewBuffer(decompressed)
 	header := headerPool.Get().(*packet.Header)
 	defer func() {
 		headerPool.Put(header)
 		if r := recover(); r != nil {
+			fmt.Println(r, "Conn.Read")
 			err = fmt.Errorf("panic while decoding packet %v: %v", header.PacketID, r)
 		}
 	}()
@@ -301,6 +316,7 @@ func (c *Conn) read() (pk any, err error) {
 
 	factory, ok := c.pool[header.PacketID]
 	if !ok {
+		fmt.Printf("unknown packet ID %v\n", header.PacketID)
 		return nil, fmt.Errorf("unknown packet ID %v", header.PacketID)
 	}
 	pk = factory()

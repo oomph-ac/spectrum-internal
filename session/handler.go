@@ -102,15 +102,16 @@ loop:
 		default:
 		}
 
-		payload, err := s.client.ReadBytes()
+		payloads, err := s.client.ReadBatchBytes()
 		if err != nil {
 			s.CloseWithError(fmt.Errorf("failed to read packet from client: %w", err))
 			logError(s, "failed to read packet from client", err)
 			break loop
 		}
-
-		if err := handleClientPacket(s, header, pool, shieldID, payload); err != nil {
-			s.Server().CloseWithError(fmt.Errorf("failed to write packet to server: %w", err))
+		for _, payload := range payloads {
+			if err := handleClientPacket(s, header, pool, shieldID, payload); err != nil {
+				s.Server().CloseWithError(fmt.Errorf("failed to write packet to server: %w", err))
+			}
 		}
 	}
 }

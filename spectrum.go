@@ -50,6 +50,7 @@ func NewSpectrum(discovery server.Discovery, logger *slog.Logger, opts *util.Opt
 // Listen sets up a minecraft.Listener for incoming connections based on the provided minecraft.ListenConfig.
 // The listener is then used by the Accept() method for accepting incoming connections.
 func (s *Spectrum) Listen(config minecraft.ListenConfig) (err error) {
+	config.EnableBatchReading = true
 	listener, err := config.Listen("raknet", s.opts.Addr)
 	if err != nil {
 		s.logger.Error("failed to listen", "err", err)
