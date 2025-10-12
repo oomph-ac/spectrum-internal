@@ -9,6 +9,8 @@ import (
 	"time"
 
 	spectrumpacket "github.com/cooldogedev/spectrum/server/packet"
+	"github.com/sandertv/gophertunnel/minecraft"
+	"github.com/sandertv/gophertunnel/minecraft/protocol"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 )
 
@@ -108,10 +110,13 @@ loop:
 			logError(s, "failed to read packet from client", err)
 			break loop
 		}
-		for _, payload := range payloads {
-			if err := handleClientPacket(s, header, pool, shieldID, payload); err != nil {
+		/* for _, payload := range payloads {
+			if err := handleClientPacketLegacy(s, header, pool, shieldID, payload); err != nil {
 				s.Server().CloseWithError(fmt.Errorf("failed to write packet to server: %w", err))
 			}
+		} */
+		if err := handleClientBatch(s, header, pool, shieldID, payloads); err != nil {
+			s.Server().CloseWithError(fmt.Errorf("failed to write packet to server: %w", err))
 		}
 	}
 }
@@ -154,8 +159,102 @@ func handleServerPacket(s *Session, pk packet.Packet) (err error) {
 	return s.client.WritePacket(pk)
 }
 
-// handleClientPacket processes and forwards the provided packet from the client to the server.
-func handleClientPacket(s *Session, header *packet.Header, pool packet.Pool, shieldID int32, payload []byte) (err error) {
+func handleClientBatch(s *Session, header *packet.Header, pool packet.Pool, shieldID int32, payloads [][]byte) (err error) {
+	batch := make([][]byte, 0, len(payloads))
+	for _, payload := range payloads {
+		extras, err := handleClientPacket(s, header, pool, shieldID, &payload)
+		if err != nil {
+			return err
+		}
+		if payload != nil {
+			batch = append(batch, payload)
+		}
+
+		for _, extraPayload := range extras {
+			batch = append(batch, extraPayload)
+		}
+	}
+	return s.Server().WriteBatch(batch)
+}
+
+func handleClientPacket(s *Session, header *packet.Header, pool packet.Pool, shieldID int32, payload *[]byte) (extraPayloads [][]byte, err error) {
+	ctx := NewContext()
+	buf := bytes.NewBuffer(*payload)
+	if err := header.Read(buf); err != nil {
+		return nil, errors.New("failed to decode header")
+	}
+	if !slices.Contains(s.opts.ClientDecode, header.PacketID) {
+		s.Processor().ProcessClientEncoded(ctx, payload)
+		if ctx.Cancelled() {
+			// We shouldn't include this in our batch write.
+			*payload = nil
+		}
+		return
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic while decoding packet %v: %v", header.PacketID, r)
+		}
+	}()
+
+	factory, ok := pool[header.PacketID]
+	if !ok {
+		return nil, fmt.Errorf("unknown packet %d", header.PacketID)
+	}
+	pk := factory()
+	pk.Marshal(s.client.Proto().NewReader(buf, shieldID, true))
+	if s.opts.SyncProtocol {
+		s.Processor().ProcessClient(ctx, &pk)
+		if ctx.Cancelled() {
+			*payload = nil
+		}
+
+		buf.Reset()
+		w := s.client.Proto().NewWriter(buf, shieldID)
+		header.PacketID = pk.ID()
+		_ = header.Write(buf)
+		pk.Marshal(w)
+		out := make([]byte, buf.Len())
+		copy(out, buf.Bytes())
+		*payload = out
+		return
+	}
+
+	var upgraded []packet.Packet
+	if s.client.Proto().ID() == protocol.CurrentProtocol {
+		upgraded = []packet.Packet{pk}
+	} else {
+		upgraded = s.client.Proto().ConvertToLatest(pk, s.client)
+	}
+
+	for index, latest := range upgraded {
+		s.Processor().ProcessClient(ctx, &latest)
+		if ctx.Cancelled() {
+			if index == 0 {
+				*payload = nil
+			}
+			continue
+		}
+
+		buf.Reset()
+		w := minecraft.DefaultProtocol.NewWriter(buf, shieldID)
+		header.PacketID = latest.ID()
+		_ = header.Write(buf)
+		latest.Marshal(w)
+		out := make([]byte, buf.Len())
+		copy(out, buf.Bytes())
+		if index == 0 {
+			*payload = out
+		} else {
+			extraPayloads = append(extraPayloads, out)
+		}
+	}
+	return extraPayloads, nil
+}
+
+// handleClientPacketLegacy processes and forwards the provided packet from the client to the server.
+func handleClientPacketLegacy(s *Session, header *packet.Header, pool packet.Pool, shieldID int32, payload []byte) (err error) {
 	ctx := NewContext()
 	buf := bytes.NewBuffer(payload)
 	if err := header.Read(buf); err != nil {

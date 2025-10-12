@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,21 +22,29 @@ import (
 const (
 	flagPacketDecode byte = 1 << iota
 	flagPacketCompressed
+	flagPacketIsBatch
 
 	compressionThreshold int = 256
+	maxBatchPooledSize   int = 1024 * 1024 // 1MB
 )
 
-var bufferPool = sync.Pool{
-	New: func() any {
-		return bytes.NewBuffer(make([]byte, 0, 256))
-	},
-}
-
-var headerPool = sync.Pool{
-	New: func() any {
-		return &packet.Header{}
-	},
-}
+var (
+	bufferPool = sync.Pool{
+		New: func() any {
+			return bytes.NewBuffer(make([]byte, 0, 256))
+		},
+	}
+	batchPool = sync.Pool{
+		New: func() any {
+			return bytes.NewBuffer(make([]byte, 0, maxBatchPooledSize))
+		},
+	}
+	headerPool = sync.Pool{
+		New: func() any {
+			return &packet.Header{}
+		},
+	}
+)
 
 // Conn represents a connection to a server, managing packet reading and writing
 // over an underlying io.ReadWriteCloser.
@@ -136,6 +145,41 @@ func (c *Conn) ReadPacket() (any, error) {
 	return c.ReadPacket()
 }
 
+// WriteBatch writes the provided packets to the underlying connection.
+func (c *Conn) WriteBatch(payloads [][]byte) error {
+	select {
+	case <-c.ctx.Done():
+		return context.Cause(c.ctx)
+	default:
+		// OK
+	}
+
+	if len(payloads) == 0 {
+		return nil
+	}
+
+	buf := batchPool.Get().(*bytes.Buffer)
+	defer func() {
+		if buf.Cap() == maxBatchPooledSize {
+			buf.Reset()
+			batchPool.Put(buf)
+		}
+	}()
+
+	var lenBuf = make([]byte, 4)
+	for _, payload := range payloads {
+		// Write the length of the packet, 4 bytes big-endian
+		binary.LittleEndian.PutUint32(lenBuf, uint32(len(payload)))
+		buf.Write(lenBuf)
+		buf.Write(payload)
+	}
+
+	if buf.Len() > compressionThreshold {
+		c.writer.WriteWithFlags(flagPacketCompressed|flagPacketIsBatch, snappy.Encode(nil, buf.Bytes()))
+	}
+	return c.writer.WriteWithFlags(flagPacketIsBatch, buf.Bytes())
+}
+
 // WritePacket encodes and writes the provided packet to the underlying connection.
 func (c *Conn) WritePacket(pk packet.Packet) error {
 	select {
@@ -159,17 +203,17 @@ func (c *Conn) WritePacket(pk packet.Packet) error {
 	pk.Marshal(c.protocol.NewWriter(buf, c.shieldID))
 
 	if buf.Len() > compressionThreshold {
-		return c.writer.Write(append([]byte{flagPacketCompressed}, snappy.Encode(nil, buf.Bytes())...))
+		return c.writer.WriteWithFlags(flagPacketCompressed, snappy.Encode(nil, buf.Bytes()))
 	}
-	return c.writer.Write(append([]byte{0}, buf.Bytes()...))
+	return c.writer.WriteWithFlags(0, buf.Bytes())
 }
 
 // Write writes provided byte slice to the underlying connection.
 func (c *Conn) Write(p []byte) error {
 	if len(p) > compressionThreshold {
-		return c.writer.Write(append([]byte{flagPacketCompressed}, snappy.Encode(nil, p)...))
+		return c.writer.WriteWithFlags(flagPacketCompressed, snappy.Encode(nil, p))
 	}
-	return c.writer.Write(append([]byte{0}, p...))
+	return c.writer.WriteWithFlags(0, p)
 }
 
 // DoConnect sends a ConnectionRequest packet to initiate the connection sequence.

@@ -11,15 +11,19 @@ type Writer struct {
 	// w is the underlying io.Writer used for writing data.
 	w io.Writer
 	// p is a reusable byte slice used for writing the length of the packet.
-	p  []byte
+	p []byte
+	// pwf is a reusable byte slice used for writing the length of the packet with flags.
+	pwf []byte
+
 	mu sync.Mutex
 }
 
 // NewWriter creates a new Writer with the given io.Writer.
 func NewWriter(w io.Writer) *Writer {
 	return &Writer{
-		w: w,
-		p: make([]byte, 4),
+		w:   w,
+		p:   make([]byte, 4),
+		pwf: make([]byte, 5),
 	}
 }
 
@@ -31,6 +35,18 @@ func (w *Writer) Write(data []byte) error {
 	defer w.mu.Unlock()
 	binary.BigEndian.PutUint32(w.p, uint32(len(data)))
 	if _, err := w.w.Write(w.p); err != nil {
+		return err
+	}
+	_, err := w.w.Write(data)
+	return err
+}
+
+func (w *Writer) WriteWithFlags(flags byte, data []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	binary.BigEndian.PutUint32(w.pwf, uint32(len(data)+1))
+	w.pwf[4] = flags
+	if _, err := w.w.Write(w.pwf); err != nil {
 		return err
 	}
 	_, err := w.w.Write(data)
