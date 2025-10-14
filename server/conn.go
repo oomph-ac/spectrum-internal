@@ -328,7 +328,7 @@ func (c *Conn) read() (pk any, err error) {
 	}
 
 	flags := payload[0]
-	//needDecode := flags&flagPacketDecode != 0
+	isDecodeNeeded := flags&flagPacketDecode != 0
 	isCompressed := flags&flagPacketCompressed != 0
 
 	var decompressed []byte
@@ -341,9 +341,9 @@ func (c *Conn) read() (pk any, err error) {
 		decompressed = payload[1:]
 	}
 
-	/* if !needDecode {
+	if !isDecodeNeeded {
 		return decompressed, nil
-	} */
+	}
 
 	buf := bytes.NewBuffer(decompressed)
 	header := headerPool.Get().(*packet.Header)
