@@ -68,7 +68,7 @@ loop:
 				break loop
 			}
 		case []byte:
-			ctx := NewContext()
+			ctx := NewPacketContext()
 			s.Processor().ProcessServerEncoded(ctx, &pk)
 			if ctx.Cancelled() {
 				continue loop
@@ -143,7 +143,7 @@ loop:
 
 // handleServerPacket processes and forwards the provided packet from the server to the client.
 func handleServerPacket(s *Session, pk packet.Packet) (err error) {
-	ctx := NewContext()
+	ctx := NewPacketContext()
 	s.Processor().ProcessServer(ctx, &pk)
 	if ctx.Cancelled() {
 		return
@@ -169,16 +169,13 @@ func handleClientBatch(s *Session, header *packet.Header, pool packet.Pool, shie
 		if payload != nil {
 			batch = append(batch, payload)
 		}
-
-		for _, extraPayload := range extras {
-			batch = append(batch, extraPayload)
-		}
+		batch = append(batch, extras...)
 	}
 	return s.Server().WriteBatch(batch)
 }
 
 func handleClientPacket(s *Session, header *packet.Header, pool packet.Pool, shieldID int32, payload *[]byte) (extraPayloads [][]byte, err error) {
-	ctx := NewContext()
+	ctx := NewPacketContext()
 	buf := bytes.NewBuffer(*payload)
 	if err := header.Read(buf); err != nil {
 		return nil, errors.New("failed to decode header")
@@ -209,15 +206,16 @@ func handleClientPacket(s *Session, header *packet.Header, pool packet.Pool, shi
 		if ctx.Cancelled() {
 			*payload = nil
 		}
-
-		buf.Reset()
-		w := s.client.Proto().NewWriter(buf, shieldID)
-		header.PacketID = pk.ID()
-		_ = header.Write(buf)
-		pk.Marshal(w)
-		out := make([]byte, buf.Len())
-		copy(out, buf.Bytes())
-		*payload = out
+		if ctx.Modified() {
+			buf.Reset()
+			w := s.client.Proto().NewWriter(buf, shieldID)
+			header.PacketID = pk.ID()
+			_ = header.Write(buf)
+			pk.Marshal(w)
+			out := make([]byte, buf.Len())
+			copy(out, buf.Bytes())
+			*payload = out
+		}
 		return
 	}
 
@@ -236,18 +234,19 @@ func handleClientPacket(s *Session, header *packet.Header, pool packet.Pool, shi
 			}
 			continue
 		}
-
-		buf.Reset()
-		w := minecraft.DefaultProtocol.NewWriter(buf, shieldID)
-		header.PacketID = latest.ID()
-		_ = header.Write(buf)
-		latest.Marshal(w)
-		out := make([]byte, buf.Len())
-		copy(out, buf.Bytes())
-		if index == 0 {
-			*payload = out
-		} else {
-			extraPayloads = append(extraPayloads, out)
+		if ctx.Modified() || index != 0 {
+			buf.Reset()
+			w := minecraft.DefaultProtocol.NewWriter(buf, shieldID)
+			header.PacketID = latest.ID()
+			_ = header.Write(buf)
+			latest.Marshal(w)
+			out := make([]byte, buf.Len())
+			copy(out, buf.Bytes())
+			if index == 0 {
+				*payload = out
+			} else {
+				extraPayloads = append(extraPayloads, out)
+			}
 		}
 	}
 	return extraPayloads, nil
@@ -255,7 +254,7 @@ func handleClientPacket(s *Session, header *packet.Header, pool packet.Pool, shi
 
 // handleClientPacketLegacy processes and forwards the provided packet from the client to the server.
 func handleClientPacketLegacy(s *Session, header *packet.Header, pool packet.Pool, shieldID int32, payload []byte) (err error) {
-	ctx := NewContext()
+	ctx := NewPacketContext()
 	buf := bytes.NewBuffer(payload)
 	if err := header.Read(buf); err != nil {
 		return errors.New("failed to decode header")

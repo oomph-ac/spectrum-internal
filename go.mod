@@ -33,3 +33,5 @@ require (
 )
 
 replace github.com/sandertv/gophertunnel => ../gophertunnel
+
+replace github.com/sandertv/go-raknet => ../go-raknet
