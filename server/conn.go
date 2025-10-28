@@ -209,11 +209,11 @@ func (c *Conn) WritePacket(pk packet.Packet) error {
 }
 
 // Write writes provided byte slice to the underlying connection.
-func (c *Conn) Write(p []byte) error {
+func (c *Conn) Write(p []byte) (int, error) {
 	if len(p) > compressionThreshold {
-		return c.writer.WriteWithFlags(flagPacketCompressed, snappy.Encode(nil, p))
+		return len(p), c.writer.WriteWithFlags(flagPacketCompressed, snappy.Encode(nil, p))
 	}
-	return c.writer.WriteWithFlags(0, p)
+	return len(p), c.writer.WriteWithFlags(0, p)
 }
 
 // DoConnect sends a ConnectionRequest packet to initiate the connection sequence.

@@ -263,7 +263,8 @@ func handleClientPacketLegacy(s *Session, header *packet.Header, pool packet.Poo
 	if !slices.Contains(s.opts.ClientDecode, header.PacketID) {
 		s.Processor().ProcessClientEncoded(ctx, &payload)
 		if !ctx.Cancelled() {
-			return s.Server().Write(payload)
+			_, err := s.Server().Write(payload)
+			return err
 		}
 		return
 	}
