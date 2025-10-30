@@ -162,30 +162,35 @@ func handleServerPacket(s *Session, pk packet.Packet) (err error) {
 func handleClientBatch(s *Session, header *packet.Header, pool packet.Pool, shieldID int32, payloads [][]byte) (err error) {
 	batch := make([][]byte, 0, len(payloads))
 	for _, payload := range payloads {
-		extras, err := handleClientPacket(s, header, pool, shieldID, &payload)
+		newPayload, extraPayloads, err := handleClientPacket(s, header, pool, shieldID, payload)
 		if err != nil {
 			return err
 		}
-		if payload != nil {
-			batch = append(batch, payload)
+		if newPayload != nil {
+			batch = append(batch, newPayload)
 		}
-		batch = append(batch, extras...)
+		batch = append(batch, extraPayloads...)
 	}
 	return s.Server().WriteBatch(batch)
 }
 
-func handleClientPacket(s *Session, header *packet.Header, pool packet.Pool, shieldID int32, payload *[]byte) (extraPayloads [][]byte, err error) {
+func handleClientPacket(s *Session, header *packet.Header, pool packet.Pool, shieldID int32, payload []byte) (newPayload []byte, extraPayloads [][]byte, err error) {
 	ctx := NewPacketContext()
-	buf := bytes.NewBuffer(*payload)
+	buf := bytes.NewBuffer(payload)
 	if err := header.Read(buf); err != nil {
-		return nil, errors.New("failed to decode header")
+		return nil, nil, errors.New("failed to decode header")
+	}
+
+	factory, ok := pool[header.PacketID]
+	if !ok {
+		return nil, nil, fmt.Errorf("unknown packet: %d", header.PacketID)
 	}
 	if !slices.Contains(s.opts.ClientDecode, header.PacketID) {
-		s.Processor().ProcessClientEncoded(ctx, payload)
+		s.Processor().ProcessClientEncoded(ctx, &payload)
 		if ctx.Cancelled() {
-			// We shouldn't include this in our batch write.
-			*payload = nil
+			return
 		}
+		newPayload = payload
 		return
 	}
 
@@ -195,26 +200,21 @@ func handleClientPacket(s *Session, header *packet.Header, pool packet.Pool, shi
 		}
 	}()
 
-	factory, ok := pool[header.PacketID]
-	if !ok {
-		return nil, fmt.Errorf("unknown packet %d", header.PacketID)
-	}
 	pk := factory()
 	pk.Marshal(s.client.Proto().NewReader(buf, shieldID, true))
+
 	if s.opts.SyncProtocol {
 		s.Processor().ProcessClient(ctx, &pk)
-		if ctx.Cancelled() {
-			*payload = nil
+		if !ctx.Cancelled() {
+			newPayload = payload
 		}
 		if ctx.Modified() {
-			buf.Reset()
-			w := s.client.Proto().NewWriter(buf, shieldID)
+			pkBuf := bytes.NewBuffer(nil)
+			w := s.client.Proto().NewWriter(pkBuf, shieldID)
 			header.PacketID = pk.ID()
-			_ = header.Write(buf)
+			_ = header.Write(pkBuf)
 			pk.Marshal(w)
-			out := make([]byte, buf.Len())
-			copy(out, buf.Bytes())
-			*payload = out
+			newPayload = pkBuf.Bytes()
 		}
 		return
 	}
@@ -229,25 +229,20 @@ func handleClientPacket(s *Session, header *packet.Header, pool packet.Pool, shi
 	for index, latest := range upgraded {
 		s.Processor().ProcessClient(ctx, &latest)
 		if ctx.Cancelled() {
-			if index == 0 {
-				*payload = nil
-			}
 			continue
 		}
-		buf.Reset()
-		w := minecraft.DefaultProtocol.NewWriter(buf, shieldID)
+		newPkBuf := bytes.NewBuffer(nil)
+		w := minecraft.DefaultProtocol.NewWriter(newPkBuf, shieldID)
 		header.PacketID = latest.ID()
-		_ = header.Write(buf)
+		_ = header.Write(newPkBuf)
 		latest.Marshal(w)
-		out := make([]byte, buf.Len())
-		copy(out, buf.Bytes())
 		if index == 0 {
-			*payload = out
+			newPayload = newPkBuf.Bytes()
 		} else {
-			extraPayloads = append(extraPayloads, out)
+			extraPayloads = append(extraPayloads, newPkBuf.Bytes())
 		}
 	}
-	return extraPayloads, nil
+	return
 }
 
 // handleClientPacketLegacy processes and forwards the provided packet from the client to the server.
