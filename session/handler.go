@@ -234,19 +234,17 @@ func handleClientPacket(s *Session, header *packet.Header, pool packet.Pool, shi
 			}
 			continue
 		}
-		if ctx.Modified() || index != 0 {
-			buf.Reset()
-			w := minecraft.DefaultProtocol.NewWriter(buf, shieldID)
-			header.PacketID = latest.ID()
-			_ = header.Write(buf)
-			latest.Marshal(w)
-			out := make([]byte, buf.Len())
-			copy(out, buf.Bytes())
-			if index == 0 {
-				*payload = out
-			} else {
-				extraPayloads = append(extraPayloads, out)
-			}
+		buf.Reset()
+		w := minecraft.DefaultProtocol.NewWriter(buf, shieldID)
+		header.PacketID = latest.ID()
+		_ = header.Write(buf)
+		latest.Marshal(w)
+		out := make([]byte, buf.Len())
+		copy(out, buf.Bytes())
+		if index == 0 {
+			*payload = out
+		} else {
+			extraPayloads = append(extraPayloads, out)
 		}
 	}
 	return extraPayloads, nil
