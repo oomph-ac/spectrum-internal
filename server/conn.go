@@ -476,7 +476,6 @@ func (c *Conn) handleStartGame(pk *packet.StartGame) error {
 // handleItemRegistry handles the ItemRegistry packet.
 func (c *Conn) handleItemRegistry(pk *packet.ItemRegistry) error {
 	c.logger.Debug("received item_registry, expecting chunk_radius_updated")
-	c.deferPacket(pk)
 	c.expect(packet.IDChunkRadiusUpdated)
 	c.gameData.Items = pk.Items
 	for _, item := range pk.Items {
