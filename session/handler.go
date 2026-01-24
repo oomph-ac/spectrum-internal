@@ -117,6 +117,8 @@ loop:
 		} */
 		if err := handleClientBatch(s, header, pool, shieldID, payloads); err != nil {
 			s.Server().CloseWithError(fmt.Errorf("failed to write packet to server: %w", err))
+			logError(s, "failed to write packet to server", err)
+			break loop
 		}
 	}
 }
@@ -205,8 +207,8 @@ func handleClientPacket(s *Session, header *packet.Header, pool packet.Pool, shi
 
 	if s.opts.SyncProtocol {
 		s.Processor().ProcessClient(ctx, &pk)
-		if !ctx.Cancelled() {
-			newPayload = payload
+		if ctx.Cancelled() {
+			return
 		}
 		if ctx.Modified() {
 			pkBuf := bytes.NewBuffer(nil)
@@ -215,6 +217,8 @@ func handleClientPacket(s *Session, header *packet.Header, pool packet.Pool, shi
 			_ = header.Write(pkBuf)
 			pk.Marshal(w)
 			newPayload = pkBuf.Bytes()
+		} else {
+			newPayload = payload
 		}
 		return
 	}
@@ -227,8 +231,9 @@ func handleClientPacket(s *Session, header *packet.Header, pool packet.Pool, shi
 	}
 
 	for index, latest := range upgraded {
-		s.Processor().ProcessClient(ctx, &latest)
-		if ctx.Cancelled() {
+		pkCtx := NewPacketContext()
+		s.Processor().ProcessClient(pkCtx, &latest)
+		if pkCtx.Cancelled() {
 			continue
 		}
 		newPkBuf := bytes.NewBuffer(nil)

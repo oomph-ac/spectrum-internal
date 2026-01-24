@@ -175,7 +175,7 @@ func (c *Conn) WriteBatch(payloads [][]byte) error {
 	}
 
 	if buf.Len() > compressionThreshold {
-		c.writer.WriteWithFlags(flagPacketCompressed|flagPacketIsBatch, snappy.Encode(nil, buf.Bytes()))
+		return c.writer.WriteWithFlags(flagPacketCompressed|flagPacketIsBatch, snappy.Encode(nil, buf.Bytes()))
 	}
 	return c.writer.WriteWithFlags(flagPacketIsBatch, buf.Bytes())
 }
