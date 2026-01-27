@@ -274,6 +274,10 @@ func (c *Conn) DoSpawn() error {
 	default:
 	}
 	close(c.spawned)
+
+	if err := c.WritePacket(&packet.ClientCacheStatus{Enabled: c.client.ClientCacheEnabled()}); err != nil {
+		return err
+	}
 	return c.WritePacket(&packet.SetLocalPlayerAsInitialised{EntityRuntimeID: c.runtimeID})
 }
 
