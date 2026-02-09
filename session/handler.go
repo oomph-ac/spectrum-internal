@@ -62,14 +62,27 @@ loop:
 		case *spectrumpacket.UpdateCache:
 			s.SetCache(pk.Cache)
 		case packet.Packet:
-			if err := handleServerPacket(s, pk); err != nil {
+			ctx := NewPacketContext(nil, pk)
+			s.Processor().ProcessServer(ctx)
+			if ctx.Cancelled() {
+				continue loop
+			}
+
+			if s.opts.SyncProtocol {
+				for _, latest := range s.client.Proto().ConvertToLatest(pk, s.client) {
+					s.tracker.handlePacket(latest)
+				}
+			} else {
+				s.tracker.handlePacket(pk)
+			}
+			if err := s.client.WritePacket(pk); err != nil {
 				s.CloseWithError(fmt.Errorf("failed to write packet to client: %w", err))
 				logError(s, "failed to write packet to client", err)
 				break loop
 			}
 		case []byte:
-			ctx := NewPacketContext()
-			s.Processor().ProcessServerEncoded(ctx, &pk)
+			ctx := NewPacketContext(pk, nil)
+			s.Processor().ProcessServer(ctx)
 			if ctx.Cancelled() {
 				continue loop
 			}
@@ -143,162 +156,95 @@ loop:
 	}
 }
 
-// handleServerPacket processes and forwards the provided packet from the server to the client.
-func handleServerPacket(s *Session, pk packet.Packet) (err error) {
-	ctx := NewPacketContext()
-	s.Processor().ProcessServer(ctx, &pk)
-	if ctx.Cancelled() {
-		return
-	}
-
-	if s.opts.SyncProtocol {
-		for _, latest := range s.client.Proto().ConvertToLatest(pk, s.client) {
-			s.tracker.handlePacket(latest)
-		}
-	} else {
-		s.tracker.handlePacket(pk)
-	}
-	return s.client.WritePacket(pk)
-}
-
 func handleClientBatch(s *Session, header *packet.Header, pool packet.Pool, shieldID int32, payloads [][]byte) (err error) {
-	batch := make([][]byte, 0, len(payloads))
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic while handling batch: %v", r)
+		}
+	}()
+
+	ctxBatch := make([]*PacketContext, 0, len(payloads))
 	for _, payload := range payloads {
-		newPayload, extraPayloads, err := handleClientPacket(s, header, pool, shieldID, payload)
+		ctx, err := decodeAndCreateContext(s, header, pool, shieldID, payload)
 		if err != nil {
 			return err
-		}
-		if newPayload != nil {
-			batch = append(batch, newPayload)
-		}
-		batch = append(batch, extraPayloads...)
-	}
-	return s.Server().WriteBatch(batch)
-}
-
-func handleClientPacket(s *Session, header *packet.Header, pool packet.Pool, shieldID int32, payload []byte) (newPayload []byte, extraPayloads [][]byte, err error) {
-	ctx := NewPacketContext()
-	buf := bytes.NewBuffer(payload)
-	if err := header.Read(buf); err != nil {
-		return nil, nil, errors.New("failed to decode header")
-	}
-
-	factory, ok := pool[header.PacketID]
-	if !ok {
-		return nil, nil, fmt.Errorf("unknown packet: %d", header.PacketID)
-	}
-	if !slices.Contains(s.opts.ClientDecode, header.PacketID) {
-		s.Processor().ProcessClientEncoded(ctx, &payload)
-		if ctx.Cancelled() {
-			return
-		}
-		newPayload = payload
-		return
-	}
-
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("panic while decoding packet %v: %v", header.PacketID, r)
-		}
-	}()
-
-	pk := factory()
-	pk.Marshal(s.client.Proto().NewReader(buf, shieldID, true))
-
-	if s.opts.SyncProtocol {
-		s.Processor().ProcessClient(ctx, &pk)
-		if ctx.Cancelled() {
-			return
-		}
-		if ctx.Modified() {
-			pkBuf := bytes.NewBuffer(nil)
-			w := s.client.Proto().NewWriter(pkBuf, shieldID)
-			header.PacketID = pk.ID()
-			_ = header.Write(pkBuf)
-			pk.Marshal(w)
-			newPayload = pkBuf.Bytes()
-		} else {
-			newPayload = payload
-		}
-		return
-	}
-
-	var upgraded []packet.Packet
-	if s.client.Proto().ID() == protocol.CurrentProtocol {
-		upgraded = []packet.Packet{pk}
-	} else {
-		upgraded = s.client.Proto().ConvertToLatest(pk, s.client)
-	}
-
-	for index, latest := range upgraded {
-		pkCtx := NewPacketContext()
-		s.Processor().ProcessClient(pkCtx, &latest)
-		if pkCtx.Cancelled() {
+		} else if ctx == nil {
 			continue
 		}
-		newPkBuf := bytes.NewBuffer(nil)
-		w := minecraft.DefaultProtocol.NewWriter(newPkBuf, shieldID)
-		header.PacketID = latest.ID()
-		_ = header.Write(newPkBuf)
-		latest.Marshal(w)
-		if index == 0 {
-			newPayload = newPkBuf.Bytes()
-		} else {
-			extraPayloads = append(extraPayloads, newPkBuf.Bytes())
-		}
+		ctxBatch = append(ctxBatch, ctx)
 	}
-	return
+
+	s.Processor().ProcessClient(ctxBatch)
+	payloadBatch := make([][]byte, 0, len(ctxBatch))
+	for _, ctx := range ctxBatch {
+		if ctx.Cancelled() {
+			ReturnPacketContext(ctx)
+			continue
+		}
+		if !ctx.Modified() || ctx.decoded == nil {
+			payloadBatch = append(payloadBatch, ctx.raw)
+			ReturnPacketContext(ctx)
+			continue
+		}
+
+		// If the packet was modified, we have to re-encode the packet, and then append that to the payload batch.
+		var proto minecraft.Protocol
+		if s.opts.SyncProtocol {
+			proto = s.client.Proto()
+		} else {
+			proto = minecraft.DefaultProtocol
+		}
+
+		newPkBuf := bytes.NewBuffer(nil)
+		w := proto.NewWriter(newPkBuf, shieldID)
+		header.PacketID = ctx.decoded.ID()
+		_ = header.Write(newPkBuf)
+		ctx.decoded.Marshal(w)
+		payloadBatch = append(payloadBatch, newPkBuf.Bytes())
+	}
+	return s.Server().WriteBatch(payloadBatch)
 }
 
-// handleClientPacketLegacy processes and forwards the provided packet from the client to the server.
-func handleClientPacketLegacy(s *Session, header *packet.Header, pool packet.Pool, shieldID int32, payload []byte) (err error) {
-	ctx := NewPacketContext()
-	buf := bytes.NewBuffer(payload)
-	if err := header.Read(buf); err != nil {
-		return errors.New("failed to decode header")
-	}
-
-	if !slices.Contains(s.opts.ClientDecode, header.PacketID) {
-		s.Processor().ProcessClientEncoded(ctx, &payload)
-		if !ctx.Cancelled() {
-			_, err := s.Server().Write(payload)
-			return err
-		}
-		return
-	}
-
+// decodeAndCreateContext decodes a client packet and either returns packet.Packet if decode is specified, or a byte slice if decode is not needed. It also will
+// return any errors that occur while decoding this packet. If SyncProtocol is disabled and the session needs packets to be upgraded, we've made the assumption that
+// only the first packet from the upgraded array needs to be handled, as there aren't any cases known yet where it's actually neccessary for the client specifically.
+func decodeAndCreateContext(s *Session, header *packet.Header, pool packet.Pool, shieldID int32, payload []byte) (ctx *PacketContext, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("panic while decoding packet %v: %v", header.PacketID, r)
+			err = fmt.Errorf("panic while decoding packet from client batch: %v", r)
 		}
 	}()
 
-	factory, ok := pool[header.PacketID]
+	buf := bytes.NewBuffer(payload)
+	if err := header.Read(buf); err != nil {
+		return nil, errors.New("failed to decode header")
+	}
+
+	pkFunc, ok := pool[header.PacketID]
 	if !ok {
-		return fmt.Errorf("unknown packet %d", header.PacketID)
+		return nil, fmt.Errorf("unknown packet with id %d", header.PacketID)
 	}
 
-	pk := factory()
-	pk.Marshal(s.client.Proto().NewReader(buf, shieldID, true))
-	if s.opts.SyncProtocol {
-		s.Processor().ProcessClient(ctx, &pk)
-		if ctx.Cancelled() {
-			return
-		}
-		return s.Server().WritePacket(pk)
+	if !slices.Contains(s.opts.ClientDecode, header.PacketID) {
+		return NewPacketContext(payload, nil), nil
 	}
 
-	for _, latest := range s.client.Proto().ConvertToLatest(pk, s.client) {
-		s.Processor().ProcessClient(ctx, &latest)
-		if ctx.Cancelled() {
-			break
-		}
-
-		if err := s.Server().WritePacket(latest); err != nil {
-			return err
-		}
+	decodedPk := pkFunc()
+	decodedPk.Marshal(s.client.Proto().NewReader(buf, shieldID, true))
+	if extra := buf.Len(); extra > 0 {
+		return nil, fmt.Errorf("%T had an extra %d bytes", decodedPk, extra)
 	}
-	return
+
+	// If we are not using SyncProtocol, we should upgrade the packet to the latest version. For now, we will ignore extra packets
+	// returned by the protocol library as there aren't any packets that require it at the moment.
+	if !s.opts.SyncProtocol && s.client.Proto().ID() != protocol.CurrentProtocol {
+		upgraded := s.client.Proto().ConvertToLatest(decodedPk, s.client)
+		if len(upgraded) == 0 {
+			return nil, nil
+		}
+		return NewPacketContext(payload, upgraded[0]), nil
+	}
+	return NewPacketContext(payload, decodedPk), nil
 }
 
 func logError(s *Session, msg string, err error) {
