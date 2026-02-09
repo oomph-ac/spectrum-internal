@@ -175,7 +175,16 @@ func handleClientBatch(s *Session, header *packet.Header, pool packet.Pool, shie
 	}
 
 	s.Processor().ProcessClient(ctxBatch)
-	payloadBatch := make([][]byte, 0, len(ctxBatch))
+	var (
+		proto        minecraft.Protocol
+		payloadBatch = make([][]byte, 0, len(ctxBatch))
+	)
+
+	if s.opts.SyncProtocol {
+		proto = s.client.Proto()
+	} else {
+		proto = minecraft.DefaultProtocol
+	}
 	for _, ctx := range ctxBatch {
 		if ctx.Cancelled() {
 			ReturnPacketContext(ctx)
@@ -189,13 +198,6 @@ func handleClientBatch(s *Session, header *packet.Header, pool packet.Pool, shie
 		}
 
 		// If the packet was modified, we have to re-encode the packet, and then append that to the payload batch.
-		var proto minecraft.Protocol
-		if s.opts.SyncProtocol {
-			proto = s.client.Proto()
-		} else {
-			proto = minecraft.DefaultProtocol
-		}
-
 		newPkBuf := bytes.NewBuffer(nil)
 		w := proto.NewWriter(newPkBuf, shieldID)
 		header.PacketID = ctx.decoded.ID()
