@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	spectrumpacket "github.com/cooldogedev/spectrum/server/packet"
@@ -233,7 +232,7 @@ func decodeAndCreateContext(s *Session, header *packet.Header, pool packet.Pool,
 	// If SyncProtocol is disabled, and the client is not on the latest version, we need to decode the packet. If we don't, this can lead to
 	// issues where we forward a legacy version packet to the downstream server, resulting in decoding errors.
 	isClientLatestVersion := s.client.Proto().ID() == protocol.CurrentProtocol
-	if !slices.Contains(s.opts.ClientDecode, header.PacketID) && (s.opts.SyncProtocol || isClientLatestVersion) {
+	if _, ok := s.opts.ClientDecode[header.PacketID]; !ok && (s.opts.SyncProtocol || isClientLatestVersion) {
 		return NewPacketContext(payload, nil), nil
 	}
 
