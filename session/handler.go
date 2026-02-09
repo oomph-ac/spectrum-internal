@@ -181,7 +181,8 @@ func handleClientBatch(s *Session, header *packet.Header, pool packet.Pool, shie
 			ReturnPacketContext(ctx)
 			continue
 		}
-		if !ctx.Modified() || ctx.decoded == nil {
+
+		if ctx.decoded == nil || !ctx.Modified() {
 			payloadBatch = append(payloadBatch, ctx.raw)
 			ReturnPacketContext(ctx)
 			continue
@@ -208,6 +209,8 @@ func handleClientBatch(s *Session, header *packet.Header, pool packet.Pool, shie
 // decodeAndCreateContext decodes a client packet and either returns packet.Packet if decode is specified, or a byte slice if decode is not needed. It also will
 // return any errors that occur while decoding this packet. If SyncProtocol is disabled and the session needs packets to be upgraded, we've made the assumption that
 // only the first packet from the upgraded array needs to be handled, as there aren't any cases known yet where it's actually neccessary for the client specifically.
+// If the client is not on the latest version and SyncProtocol is disabled, we will not ever allow for a packet to not be decoded and pass through raw. This is because
+// forwarding a raw legacy packet to a downstream likely equipped without multi-version support would lead to decoding errors.
 func decodeAndCreateContext(s *Session, header *packet.Header, pool packet.Pool, shieldID int32, payload []byte) (ctx *PacketContext, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -225,7 +228,10 @@ func decodeAndCreateContext(s *Session, header *packet.Header, pool packet.Pool,
 		return nil, fmt.Errorf("unknown packet with id %d", header.PacketID)
 	}
 
-	if !slices.Contains(s.opts.ClientDecode, header.PacketID) {
+	// If SyncProtocol is disabled, and the client is not on the latest version, we need to decode the packet. If we don't, this can lead to
+	// issues where we forward a legacy version packet to the downstream server, resulting in decoding errors.
+	isClientLatestVersion := s.client.Proto().ID() == protocol.CurrentProtocol
+	if !slices.Contains(s.opts.ClientDecode, header.PacketID) && (s.opts.SyncProtocol || isClientLatestVersion) {
 		return NewPacketContext(payload, nil), nil
 	}
 
@@ -237,7 +243,7 @@ func decodeAndCreateContext(s *Session, header *packet.Header, pool packet.Pool,
 
 	// If we are not using SyncProtocol, we should upgrade the packet to the latest version. For now, we will ignore extra packets
 	// returned by the protocol library as there aren't any packets that require it at the moment.
-	if !s.opts.SyncProtocol && s.client.Proto().ID() != protocol.CurrentProtocol {
+	if !s.opts.SyncProtocol && !isClientLatestVersion {
 		upgraded := s.client.Proto().ConvertToLatest(decodedPk, s.client)
 		if len(upgraded) == 0 {
 			return nil, nil
