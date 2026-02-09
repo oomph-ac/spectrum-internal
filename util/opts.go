@@ -6,6 +6,8 @@ type Opts struct {
 	Addr string `yaml:"addr"`
 	// AutoLogin determines whether automatic login should be enabled.
 	AutoLogin bool `yaml:"auto_login"`
+	// EnableAllClientDecode is a boolean indicating if all packets should be attempted to be decoded by the proxy.
+	EnableAllClientDecode bool `yaml:"enable_all_client_decode"`
 	// ClientDecode is a list of client packet identifiers that need to be decoded by the proxy.
 	ClientDecode map[uint32]struct{} `yaml:"client_decode"`
 	// LatencyInterval is the interval at which the latency of the connection is updated in milliseconds.
