@@ -190,7 +190,7 @@ func handleClientBatch(s *Session, header *packet.Header, pool packet.Pool, shie
 			continue
 		}
 
-		if ctx.decoded == nil || !ctx.Modified() {
+		if (ctx.decoded == nil || !ctx.Modified()) && s.client.Proto().ID() == protocol.CurrentProtocol {
 			payloadBatch = append(payloadBatch, ctx.raw)
 			ReturnPacketContext(ctx)
 			continue
